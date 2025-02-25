@@ -1,0 +1,3 @@
+-dontobfuscate
+-optimizationpasses 15
+-dontoptimize
