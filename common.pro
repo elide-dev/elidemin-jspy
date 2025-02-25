@@ -1,4 +1,5 @@
 -keep public class com.github.ajalt.clikt.** { *; }
+-keep public class com.oracle.truffle.regex.chardata.UnicodeCharacterAliases { *; }
 -keep public class org.pkl.core.runtime.VmFileDetector { *; }
 -keep public class org.pkl.core.runtime.VmLanguageProvider { *; }
 -keep public class org.pkl.core.service.ExecutorSpiImpl { *; }

@@ -284,6 +284,7 @@ val gvmFlags = (if (enablePgo) listOf(
     "--link-at-build-time=kotlin",
     "--link-at-build-time=kotlinx",
     "--link-at-build-time=com.github.ajalt",
+    "--link-at-build-time=com.oracle.truffle.js",
     "--color=always",
     "--emit=build-report",
     "-H:+UnlockExperimentalVMOptions",
@@ -357,17 +358,22 @@ dependencies {
     truffle("org.graalvm.nativeimage:truffle-runtime-svm:$graalvmVersion")
     truffle("org.graalvm.truffle:truffle-enterprise:$graalvmVersion")
     truffle("org.graalvm.shadowed:icu4j:$graalvmVersion")
+    truffle("org.graalvm.polyglot:js:$graalvmVersion")
+    truffle("org.graalvm.polyglot:python:$graalvmVersion")
+    truffle("org.graalvm.truffle:truffle-nfi-libffi:$graalvmVersion")
 
     if (enableIsolates) {
         truffle("org.graalvm.polyglot:js-isolate:$graalvmVersion")
         truffle("org.graalvm.polyglot:python:$graalvmVersion")
         truffle("org.graalvm.polyglot:python-isolate:$graalvmVersion")
     }
-    pkl("org.pkl-lang:pkl-executor:$pklVersion") { truffleExclusions() }
-    pkl("org.pkl-lang:pkl-commons-cli:$pklVersion") { truffleExclusions() }
-    pkl("org.pkl-lang:pkl-core:$pklVersion") { truffleExclusions() }
-    pkl("org.pkl-lang:pkl-cli:$pklVersion") { truffleExclusions() }
-    pkl("org.pkl-lang:pkl-stdlib:$pklVersion") { truffleExclusions() }
+    if (enablePkl) {
+        pkl("org.pkl-lang:pkl-executor:$pklVersion") { truffleExclusions() }
+        pkl("org.pkl-lang:pkl-commons-cli:$pklVersion") { truffleExclusions() }
+        pkl("org.pkl-lang:pkl-core:$pklVersion") { truffleExclusions() }
+        pkl("org.pkl-lang:pkl-cli:$pklVersion") { truffleExclusions() }
+        pkl("org.pkl-lang:pkl-stdlib:$pklVersion") { truffleExclusions() }
+    }
 }
 
 configurations.all {

@@ -20,9 +20,6 @@ import java.nio.file.Path
 import java.util.function.Supplier
 import javax.tools.ToolProvider
 
-
-private val enablePkl = System.getProperty("elide.pkl") == "true"
-
 private val languages = arrayOf(
     "js",
     "python",
@@ -306,8 +303,6 @@ class KotlinCompiler (ctx: AppContext): Command(ctx, "kotlinc") {
     }
 }
 
-class Pkl: NoOpCliktCommand("pkl")
-
 class Hello (ctx: AppContext) : Command(ctx, "hello") {
 	private val debug by option(help = "enable debug").flag()
     private val count by option(help = "number of times to print").uint().default(3u)
@@ -465,9 +460,6 @@ fun main(args: Array<String>) {
         JavaCompiler(ctx),
         JarTool(ctx),
         KotlinCompiler(ctx),
-        Pkl().subcommands(
-            org.pkl.cli.commands.EvalCommand(),
-        ),
     )
 
     Entry()
