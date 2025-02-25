@@ -1,0 +1,6 @@
+applicationType: default
+defaultPackage: elidemin.dev.elide
+testFramework: junit
+sourceLanguage: kotlin
+buildTool: gradle_kotlin
+features: [app-name, graalvm, gradle, http-client-test, junit, kotlin, kotlin-application, ksp, logback, micronaut-aop, micronaut-aot, micronaut-build, micronaut-http-validation, netty-server, properties, readme, serialization-jackson, shade, static-resources]
