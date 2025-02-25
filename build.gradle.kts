@@ -32,6 +32,8 @@ val nettyVersion = "4.1.118.Final"
 val micrometerVersion = "1.1.2"
 val jacksonVersion = "2.18.2"
 val graalvmVersion = "24.1.2"
+val pklVersion = "0.28.0-SNAPSHOT"
+val cliktVersion = "5.0.3"
 val jvmToolchain = 23
 val jvmTarget = jvmToolchain
 val kotlinTarget = JvmTarget.JVM_23
@@ -47,11 +49,15 @@ fun JavaToolchainSpec.javaToolchainSuite() {
 
 val enablePgo = false
 val enablePgoInstrument = false
+val enablePkl = true
+val enableIsolates = false
+val enableJsIsolates = false
+val enablePythonIsolates = false
 val strict = false
 val enableClang = false
 val enableLlvm = false
 val enableGccEdge = true
-val enableSbom = false
+val enableSbom = true
 val enableMinifier = true
 val enableDualMinify = true
 val enableLld = enableClang
@@ -60,7 +66,7 @@ val enableMemoryProtectionKeys = true
 val enableG1 = !enableMemoryProtectionKeys
 val enableExperimental = false
 val enableTruffle = true
-val enableAuxCache = false
+val enableAuxCache = true
 val minifierMode = "gr8"
 val compilerBackend = if (enableLlvm) "llvm" else "lir"
 val gc = if (enableG1 && !(enableAuxCache && enableTruffle)) "G1" else "serial"
@@ -112,6 +118,7 @@ val javacFlags = listOf(
     "--enable-preview",
     "--add-modules=jdk.incubator.vector",
     "--add-modules=jdk.unsupported",
+    "--add-modules=java.net.http",
     "-da",
     "-dsa",
 )
@@ -120,12 +127,27 @@ val javacOnlyFlags = listOf(
     "-g",
 )
 
-val jvmDefs = mapOf(
+val isolates = (when {
+    enableIsolates && enableJsIsolates -> "js"
+    enableIsolates && enablePythonIsolates -> "python"
+    else -> null
+})
+
+val jvmDefs = listOfNotNull(
     "polyglotimpl.DisableVersionChecks" to "false",
-)
+    "polyglot.image-build-time.PreinitializeContexts" to "js,python",
+    "polyglot.image-build-time.PreinitializeContextsWithNative" to "true",
+    "polyglot.engine.SpawnIsolate" to isolates,
+    "elide.pkl" to enablePkl.toString(),
+    "elide.isolates" to isolates,
+).toMap().also {
+    if (enableJsIsolates && enablePythonIsolates) error(
+        "Cannot enable both JS and Python isolates"
+    )
+}
 
 val jvmFlags = javacFlags.plus(listOf(
-    "--enable-native-access=org.graalvm.truffle,ALL-UNNAMED",
+    "--enable-native-access=ALL-UNNAMED",
     "-XX:+UnlockExperimentalVMOptions",
     //
 )).plus(jvmDefs.map {
@@ -138,6 +160,43 @@ val jvmFlags = javacFlags.plus(listOf(
 
 val initializeAtRuntime: List<String> = listOf(
     "kotlin.coroutines.jvm.internal.BaseContinuationImpl",
+    "org.pkl.core.runtime.VmUtils",
+    "org.pkl.core.runtime.VmMapping\$EmptyHolder",
+    "org.pkl.core.runtime.VmDynamic\$EmptyHolder",
+    "org.pkl.core.runtime.BaseModule",
+    "org.pkl.core.runtime.BaseModule\$BooleanClass",
+    "org.pkl.core.runtime.BaseModule\$MappingClass",
+    "org.pkl.core.runtime.BaseModule\$ListingClass",
+    "org.pkl.core.runtime.BaseModule\$ListClass",
+    "org.pkl.core.runtime.BaseModule\$DynamicClass",
+    "org.pkl.core.runtime.BaseModule\$FloatClass",
+    "org.pkl.core.runtime.BaseModule\$ResourceClass",
+    "org.pkl.core.runtime.BaseModule\$ModuleClass",
+    "org.pkl.core.runtime.BaseModule\$IntClass",
+    "org.pkl.core.runtime.BaseModule\$StringClass",
+    "org.pkl.core.runtime.BaseModule\$DataSizeClass",
+    "org.pkl.core.runtime.BaseModule\$Function0Class",
+    "org.pkl.core.runtime.BaseModule\$Function1Class",
+    "org.pkl.core.runtime.BaseModule\$Function2Class",
+    "org.pkl.core.runtime.BaseModule\$Function3Class",
+    "org.pkl.core.runtime.BaseModule\$Function4Class",
+    "org.pkl.core.runtime.BaseModule\$Function5Class",
+    "org.pkl.core.runtime.BaseModule\$Function6Class",
+    "org.pkl.core.runtime.BaseModule\$AnnotationClass",
+    "org.pkl.core.runtime.BaseModule\$ModuleInfoClass",
+    "org.pkl.core.runtime.ReflectModule",
+    "org.pkl.core.runtime.ReflectModule\$DeclaredTypeClass",
+    "org.pkl.core.runtime.BenchmarkModule",
+    "org.pkl.core.runtime.JsonnetModule",
+    "org.pkl.core.runtime.SemVerModule",
+    "org.pkl.core.runtime.AnalyzeModule",
+    "org.pkl.core.runtime.ProjectModule",
+    "org.pkl.core.runtime.XmlModule",
+    "org.pkl.core.runtime.TestModule",
+    "org.pkl.core.runtime.SettingsModule",
+    "org.pkl.core.stdlib.platform.PlatformNodes\$current",
+    "org.pkl.core.stdlib.protobuf.RendererNodes",
+    "org.pkl.core.stdlib.analyze.AnalyzeNodes",
 )
 
 val excludedClassPaths: List<String> = listOf(
@@ -162,7 +221,7 @@ val nativeLinker = when {
 }
 
 val nativeCompileFlags = listOf(
-    //"-Os",
+    "-Os",
     "-flto",
     "-fuse-ld=$nativeLinker",
 )
@@ -221,11 +280,16 @@ val gvmFlags = (if (enablePgo) listOf(
     "-march=$march",
     "--verbose",
     "--initialize-at-build-time",
-    "--link-at-build-time",
+    "--link-at-build-time=elidemin",
+    "--link-at-build-time=kotlin",
+    "--link-at-build-time=kotlinx",
+    "--link-at-build-time=com.github.ajalt",
     "--color=always",
     "--emit=build-report",
     "-H:+UnlockExperimentalVMOptions",
     "-H:+UseCompressedReferences",
+    "-H:IncludeResources=org/graalvm/shadowed/com/ibm/icu/ICUConfig.properties",
+    "-H:+CopyLanguageResources",
     "--static-nolibc",
     "--exact-reachability-metadata",
     "--native-compiler-path=$nativeCompilerPath",
@@ -240,6 +304,7 @@ val gvmFlags = (if (enablePgo) listOf(
 ).plus(
     if (enableAuxCache) listOf(
         "-H:+AuxiliaryEngineCache",
+        "-H:ReservedAuxiliaryImageBytes=107374182",
     ) else emptyList()
 ).plus(
     if (enableSbom) listOf(
@@ -255,18 +320,72 @@ val truffle: Configuration by configurations.creating {
     isCanBeResolved = true
 }
 
-configurations.compileClasspath.extendsFrom(
-    configurations.named("truffle")
-)
+val pkl: Configuration by configurations.creating {
+    isCanBeResolved = true
+}
+
+val unshaded: Configuration by configurations.creating {
+    isCanBeResolved = true
+}
+
+fun extendsBaseClasspath(configuration: Configuration) {
+    configurations.compileClasspath.extendsFrom(
+        configurations.named(configuration.name)
+    )
+    configurations.runtimeClasspath.extendsFrom(
+        configurations.named(configuration.name)
+    )
+}
+
+extendsBaseClasspath(truffle)
+extendsBaseClasspath(unshaded)
+extendsBaseClasspath(pkl)
+
+fun ExternalModuleDependency.truffleExclusions() {
+    exclude(group = "org.graalvm.truffle")
+    exclude(group = "org.graalvm.sdk")
+}
 
 dependencies {
-    implementation("com.github.ajalt.clikt:clikt:5.0.1")
+    implementation("com.github.ajalt.clikt:clikt:$cliktVersion")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlinVersion")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$kotlinxCoroutines")
     compileOnly("org.graalvm.nativeimage:svm:$graalvmVersion")
+
+    truffle("org.graalvm.python:python-language:$graalvmVersion")
     truffle("org.graalvm.js:js-language:$graalvmVersion")
     truffle("org.graalvm.nativeimage:truffle-runtime-svm:$graalvmVersion")
     truffle("org.graalvm.truffle:truffle-enterprise:$graalvmVersion")
+    truffle("org.graalvm.shadowed:icu4j:$graalvmVersion")
+
+    if (enableIsolates) {
+        truffle("org.graalvm.polyglot:js-isolate:$graalvmVersion")
+        truffle("org.graalvm.polyglot:python:$graalvmVersion")
+        truffle("org.graalvm.polyglot:python-isolate:$graalvmVersion")
+    }
+    pkl("org.pkl-lang:pkl-executor:$pklVersion") { truffleExclusions() }
+    pkl("org.pkl-lang:pkl-commons-cli:$pklVersion") { truffleExclusions() }
+    pkl("org.pkl-lang:pkl-core:$pklVersion") { truffleExclusions() }
+    pkl("org.pkl-lang:pkl-cli:$pklVersion") { truffleExclusions() }
+    pkl("org.pkl-lang:pkl-stdlib:$pklVersion") { truffleExclusions() }
+}
+
+configurations.all {
+    exclude("org.pkl-lang", "pkl-server")
+
+    // Exclude isolate libs for platforms we aren't targeting.
+    if (!enableIsolates) {
+        exclude(group = "org.graalvm.polyglot", module = "js-isolate")
+        exclude(group = "org.graalvm.polyglot", module = "python-isolate")
+    }
+    exclude(group = "org.graalvm.polyglot", module = "js-isolate-linux-aarch64")
+    exclude(group = "org.graalvm.polyglot", module = "js-isolate-windows-amd64")
+    exclude(group = "org.graalvm.polyglot", module = "js-isolate-darwin-amd64")
+    exclude(group = "org.graalvm.polyglot", module = "js-isolate-darwin-aarch64")
+    exclude(group = "org.graalvm.polyglot", module = "python-isolate-linux-aarch64")
+    exclude(group = "org.graalvm.polyglot", module = "python-isolate-windows-amd64")
+    exclude(group = "org.graalvm.polyglot", module = "python-isolate-darwin-amd64")
+    exclude(group = "org.graalvm.polyglot", module = "python-isolate-darwin-aarch64")
 }
 
 application {
@@ -305,9 +424,10 @@ val proguardedJar by tasks.registering(ProGuardTask::class) {
 
     configuration(files(*proguardRules.toTypedArray()))
 
-    dependsOn(tasks.shadowJar)
-    injars(tasks.shadowJar.get().outputs.files.singleFile)
-    libraryjars(truffle.files)
+    val libJars = truffle.plus(unshaded).plus(pkl).files.distinct()
+    dependsOn(tasks.jar)
+    injars(tasks.jar.get().outputs.files.singleFile)
+    libraryjars(libJars)
     val out = layout.buildDirectory.file("libs/${project.name}-proguarded.jar").get().asFile
     outjars(out)
     outputs.files(out)
@@ -316,13 +436,13 @@ val proguardedJar by tasks.registering(ProGuardTask::class) {
 val gr8MinifiedJar = gr8.create("minified") {
     r8Rules.forEach { proguardFile(layout.projectDirectory.file(it).asFile) }
     systemClassesToolchain(javac.get())
-    r8Version(defaultR8Version)
-    addClassPathJarsFrom(truffle)
+    r8Version("1.4.45")
+    addClassPathJarsFrom(truffle.plus(unshaded).plus(pkl).filter { it.extension != "pom" })
 
     if (enableDualMinify) {
         addProgramJarsFrom(proguardedJar)
     } else {
-        addProgramJarsFrom(tasks.shadowJar)
+        addProgramJarsFrom(tasks.jar)
     }
 }
 
@@ -364,12 +484,14 @@ graalvmNative {
             buildArgs.addAll(project.provider {
                 listOf(
                     "--module-path",
-                    truffle.asPath,
+                    truffle.filter { it.extension != "pom" }.asPath,
                 )
             })
             jvmArgs.addAll(jvmFlags)
 
             classpath(
+                unshaded,
+                pkl,
                 minifiedJar.get().outputs.files.filter {
                     it.extension == "jar"
                 }

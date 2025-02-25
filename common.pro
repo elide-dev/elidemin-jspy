@@ -1,4 +1,7 @@
 -keep public class com.github.ajalt.clikt.** { *; }
+-keep public class org.pkl.core.runtime.VmFileDetector { *; }
+-keep public class org.pkl.core.runtime.VmLanguageProvider { *; }
+-keep public class org.pkl.core.service.ExecutorSpiImpl { *; }
 -keep public class com.github.ajalt.mordant.terminal.terminalinterface.nativeimage.TerminalInterfaceProviderNativeImage { *; }
 -keep public class elidemin.dev.elide.ApplicationKt {
     public static void main(java.lang.String[]);
@@ -31,9 +34,21 @@
 -dontwarn kotlinx.coroutines.debug.internal.**
 -dontwarn org.codehaus.mojo.animal_sniffer.**
 -dontwarn android.**
+-dontwarn sun.misc.**
+-dontwarn javax.annotation.**
+-dontwarn org.slf4j.**
+-dontwarn org.pkl.server.**
+-dontwarn java.lang.invoke.**
+-dontwarn javax.tools.**
+-dontwarn javax.naming.**
 
 -dontnote android.**
+-dontnote sun.misc.**
 -dontnote jdk.internal.**
+-dontnote javax.tools.**
 -dontnote kotlinx.coroutines.internal.**
 -dontnote kotlin.coroutines.jvm.internal.**
 -dontnote kotlin.internal.**
+
+-dontobfuscate
+-dontoptimize
