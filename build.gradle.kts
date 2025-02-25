@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 import org.jetbrains.kotlin.gradle.dsl.jvm.JvmTargetValidationMode
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+import org.jetbrains.kotlin.gradle.utils.extendsFrom
 import proguard.gradle.ProGuardTask
 
 plugins {
@@ -31,7 +32,7 @@ val nettyVersion = "4.1.118.Final"
 val micrometerVersion = "1.1.2"
 val jacksonVersion = "2.18.2"
 val graalvmVersion = "24.1.2"
-val jvmToolchain = 24
+val jvmToolchain = 23
 val jvmTarget = jvmToolchain
 val kotlinTarget = JvmTarget.JVM_23
 val javaTarget = JavaLanguageVersion.of(jvmToolchain)
@@ -57,7 +58,7 @@ val enableLld = enableClang
 val enableMold = true
 val enableMemoryProtectionKeys = true
 val enableG1 = !enableMemoryProtectionKeys
-val enableExperimental = true
+val enableExperimental = false
 val enableTruffle = true
 val enableAuxCache = false
 val minifierMode = "gr8"
@@ -110,6 +111,7 @@ val proguardRules = listOf(
 val javacFlags = listOf(
     "--enable-preview",
     "--add-modules=jdk.incubator.vector",
+    "--add-modules=jdk.unsupported",
     "-da",
     "-dsa",
 )
@@ -118,11 +120,21 @@ val javacOnlyFlags = listOf(
     "-g",
 )
 
+val jvmDefs = mapOf(
+    "polyglotimpl.DisableVersionChecks" to "false",
+)
+
 val jvmFlags = javacFlags.plus(listOf(
-    "--enable-native-access=ALL-UNNAMED",
+    "--enable-native-access=org.graalvm.truffle,ALL-UNNAMED",
     "-XX:+UnlockExperimentalVMOptions",
-    "-XX:+UseCompactObjectHeaders",
-))
+    //
+)).plus(jvmDefs.map {
+    "-D${it.key}=${it.value}"
+}).plus(
+    if (jvmToolchain > 24) listOf(
+        "-XX:+UseCompactObjectHeaders",
+    ) else emptyList()
+)
 
 val initializeAtRuntime: List<String> = listOf(
     "kotlin.coroutines.jvm.internal.BaseContinuationImpl",
@@ -179,10 +191,8 @@ val experimentalFlags = listOf(
     "-H:+ReduceCodeSize",
     "-H:+ProtectionKeys",
     "-H:CFI=SW_NONATIVE",
-    "-H:+MLProfileInferenceUseGNNModel",
     //
     "-H:+ForeignAPISupport",
-    "-H:+VectorAPISupport",
     "-H:+LocalizationOptimizedMode",
     "-H:-BuildOutputRecommendations",
     "-H:-ReduceImplicitExceptionStackTraceInformation",
@@ -190,6 +200,11 @@ val experimentalFlags = listOf(
     //
     // "-H:+SupportRuntimeClassLoading",
     // "-H:-ClosedTypeWorld",
+).plus(
+    if (jvmTarget > 24) listOf(
+        "-H:+VectorAPISupport",
+        "-H:+MLProfileInferenceUseGNNModel",
+    ) else emptyList()
 )
 
 val gvmFlags = (if (enablePgo) listOf(
@@ -201,6 +216,7 @@ val gvmFlags = (if (enablePgo) listOf(
         "-O$optMode",
     )
 }).plus(listOf(
+    "--trace-object-instantiation=java.util.concurrent.ForkJoinWorkerThread",
     "--gc=$gc",
     "-march=$march",
     "--verbose",
@@ -235,11 +251,22 @@ val gvmFlags = (if (enablePgo) listOf(
     }
 )
 
+val truffle: Configuration by configurations.creating {
+    isCanBeResolved = true
+}
+
+configurations.compileClasspath.extendsFrom(
+    configurations.named("truffle")
+)
+
 dependencies {
     implementation("com.github.ajalt.clikt:clikt:5.0.1")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlinVersion")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$kotlinxCoroutines")
     compileOnly("org.graalvm.nativeimage:svm:$graalvmVersion")
+    truffle("org.graalvm.js:js-language:$graalvmVersion")
+    truffle("org.graalvm.nativeimage:truffle-runtime-svm:$graalvmVersion")
+    truffle("org.graalvm.truffle:truffle-enterprise:$graalvmVersion")
 }
 
 application {
@@ -280,6 +307,7 @@ val proguardedJar by tasks.registering(ProGuardTask::class) {
 
     dependsOn(tasks.shadowJar)
     injars(tasks.shadowJar.get().outputs.files.singleFile)
+    libraryjars(truffle.files)
     val out = layout.buildDirectory.file("libs/${project.name}-proguarded.jar").get().asFile
     outjars(out)
     outputs.files(out)
@@ -289,6 +317,7 @@ val gr8MinifiedJar = gr8.create("minified") {
     r8Rules.forEach { proguardFile(layout.projectDirectory.file(it).asFile) }
     systemClassesToolchain(javac.get())
     r8Version(defaultR8Version)
+    addClassPathJarsFrom(truffle)
 
     if (enableDualMinify) {
         addProgramJarsFrom(proguardedJar)
@@ -328,11 +357,23 @@ graalvmNative {
             richOutput = true
             useArgFile = true
 
-            buildArgs.addAll(javacFlags.plus(gvmFlags).plus(entrypoint))
-            jvmArgs.addAll(jvmFlags)
-            classpath(minifiedJar.get().outputs.files.filter {
-                it.extension == "jar"
+            buildArgs.addAll(javacFlags
+                .plus(gvmFlags)
+                .plus(entrypoint))
+
+            buildArgs.addAll(project.provider {
+                listOf(
+                    "--module-path",
+                    truffle.asPath,
+                )
             })
+            jvmArgs.addAll(jvmFlags)
+
+            classpath(
+                minifiedJar.get().outputs.files.filter {
+                    it.extension == "jar"
+                }
+            )
         }
     }
 
