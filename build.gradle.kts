@@ -57,7 +57,7 @@ fun JavaToolchainSpec.javaToolchainSuite() {
 
 val enablePgo = true
 val enableNativePgo = false
-val enableMosaic = false
+val enableMosaic = true
 val enableCompose = true
 val enablePgoInstrument = false
 val enableNativePgoInstrument = false

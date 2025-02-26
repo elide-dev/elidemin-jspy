@@ -16,22 +16,65 @@ import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.path
 import com.github.ajalt.clikt.parameters.types.uint
 import kotlinx.atomicfu.atomic
-// import com.jakewharton.mosaic.runMosaicBlocking
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
+import com.jakewharton.mosaic.runMosaic
 import org.graalvm.nativeimage.ImageInfo
 import org.graalvm.polyglot.*
 import org.graalvm.polyglot.Context
 import org.graalvm.polyglot.io.IOAccess
+import java.lang.Runnable
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.ThreadFactory
 import javax.tools.ToolProvider
+import kotlin.coroutines.CoroutineContext
 
 private val languages = arrayOf(
     "js",
     "python",
 )
+
+//
+
+private val engineCorePoolSize = 1u
+private val engineThreadGroup = ThreadGroup("engine")
+
+private object EngineThreadFactory : ThreadFactory {
+    override fun newThread(r: Runnable): Thread = Thread(engineThreadGroup, r).apply {
+        // nothing at this time
+    }
+}
+
+private val engineThreadpool by lazy {
+    Executors
+        .newScheduledThreadPool(engineCorePoolSize.toInt(), EngineThreadFactory)
+}
+
+val Dispatchers.Engine: CoroutineDispatcher by lazy {
+    engineThreadpool.asCoroutineDispatcher()
+}
+
+val Dispatchers.Virtual: CoroutineDispatcher by lazy {
+    object : ExecutorCoroutineDispatcher(), Executor {
+        override val executor: Executor get() = this
+
+        override fun close() = error("Cannot be invoked on Dispatchers.LOOM")
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            Thread.startVirtualThread(block)
+        }
+
+        override fun execute(command: Runnable) {
+            Thread.startVirtualThread(command)
+        }
+
+        override fun toString() = "Dispatchers.LOOM"
+    }
+}
+
+//
 
 sealed class Command(protected val ctx: AppContext, name: String) : SuspendingCliktCommand(name)
 
@@ -331,9 +374,9 @@ class Hello (ctx: AppContext) : Command(ctx, "hello") {
         repeat(count.toInt()) {
             echo("Hello world!")
         }
-//        if (jest) runMosaicBlocking {
-//            renderJestSample()
-//        }
+        if (jest) runMosaic {
+            renderJestSample()
+        }
         if (info) {
             echo("Binary path: ${Statics.binaryPath}")
             echo("Binary home: ${Statics.binaryHome}")
