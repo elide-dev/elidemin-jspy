@@ -25,6 +25,7 @@ import org.graalvm.polyglot.*
 import org.graalvm.polyglot.Context
 import org.graalvm.polyglot.io.IOAccess
 import java.nio.file.Path
+import java.nio.file.Paths
 import javax.tools.ToolProvider
 
 private val languages = arrayOf(
@@ -319,6 +320,7 @@ class KotlinCompiler (ctx: AppContext): Command(ctx, "kotlinc") {
 
 class Hello (ctx: AppContext) : Command(ctx, "hello") {
 	private val debug by option(help = "enable debug").flag()
+    private val info by option(help = "show bin info").flag()
     private val count by option(help = "number of times to print").uint().default(3u)
     private val jest by option(help = "jest").flag()
 
@@ -332,6 +334,11 @@ class Hello (ctx: AppContext) : Command(ctx, "hello") {
 //        if (jest) runMosaicBlocking {
 //            renderJestSample()
 //        }
+        if (info) {
+            echo("Binary path: ${Statics.binaryPath}")
+            echo("Binary home: ${Statics.binaryHome}")
+            echo("Resources path: ${Statics.resourcesPath}")
+        }
     }
 }
 
@@ -364,23 +371,29 @@ private val engineFlagValues: Map<String, String> by lazy {
     )
 }
 
-private const val binhome = "/home/sam/workspace/labs/gvm-min/elidemin-purekt-truffle/build/native/nativeOptimizedCompile"
-private const val binpath = "$binhome/labs"
-private const val resources = "$binhome/resources"
-private const val pythonVersion = "3.11"
-private const val graalPyVersion = "24.1"
-
 object Statics {
     private var allArgs: Array<String>? = null
     private val initialized = atomic(false)
     private val ctx = atomic<AppContext?>(null)
     private val auxCache = atomic(false)
-    private val binaryPath by lazy {
-        if (ImageInfo.inImageCode()) {
-            ProcessHandle.current().info().command().orElse("labs")
+
+    const val pythonVersion = "3.11"
+    const val graalPyVersion = "24.1"
+
+    val binaryPath: Path by lazy {
+        if (ImageInfo.inImageCode() && ImageInfo.isExecutable()) {
+            Paths.get(ProcessHandle.current().info().command().orElse("labs"))
         } else {
-            binpath
+            Paths.get(requireNotNull(System.getProperty("elide.binpath.override")))
         }
+    }
+
+    val binaryHome: Path by lazy {
+        binaryPath.parent
+    }
+
+    val resourcesPath: Path by lazy {
+        binaryPath.parent.resolve("resources")
     }
 
     fun initialize(args: Array<String>, activeCtx: AppContext) {
@@ -454,11 +467,11 @@ private val contextFlagValues by lazy {
         "python.Sha3ModuleBackend" to "native",
         "python.UseNativePrimitiveStorageStrategy" to "true",
         "python.WarnExperimentalFeatures" to "false",
-        "python.CoreHome" to "$resources/python/python-home/lib/graalpy$graalPyVersion",
-        "python.SysPrefix" to "$resources/python/python-home/lib/graalpy$graalPyVersion",
-        "python.CAPI" to "$resources/python/python-home/lib/graalpy$graalPyVersion",
-        "python.PythonHome" to "$resources/python/python-home",
-        "python.StdLibHome" to "$resources/python/python-home/lib/python$pythonVersion",
+        "python.CoreHome" to "${Statics.resourcesPath}/python/python-home/lib/graalpy${Statics.graalPyVersion}",
+        "python.SysPrefix" to "${Statics.resourcesPath}/python/python-home/lib/graalpy${Statics.graalPyVersion}",
+        "python.CAPI" to "${Statics.resourcesPath}/python/python-home/lib/graalpy${Statics.graalPyVersion}",
+        "python.PythonHome" to "${Statics.resourcesPath}/python/python-home",
+        "python.StdLibHome" to "${Statics.resourcesPath}/python/python-home/lib/python${Statics.pythonVersion}",
     )
 }
 

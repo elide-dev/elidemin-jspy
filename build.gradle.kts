@@ -175,6 +175,7 @@ val jvmDefs = globalizedJvmDefs.plus(listOf(
     "polyglot.engine.AllowExperimentalOptions" to "true",
     "polyglot.image-build-time.Cache" to "/tmp/elide-auxcache.bin",
     "polyglot.image-build-time.AllowExperimentalOptions" to "true",
+    "elide.binpath.override" to layout.buildDirectory.dir("native/nativeOptimizedCompile/labs").get().asFile.path,
     "elide.pkl" to enablePkl.toString(),
     "elide.isolates" to isolates,
     "elide.preinit" to preinitializedContexts,
