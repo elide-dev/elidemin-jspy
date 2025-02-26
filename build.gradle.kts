@@ -1,4 +1,5 @@
 import org.graalvm.buildtools.gradle.tasks.BuildNativeImageTask
+import org.jetbrains.kotlin.compose.compiler.gradle.ComposeFeatureFlag
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 import org.jetbrains.kotlin.gradle.dsl.jvm.JvmTargetValidationMode
@@ -9,9 +10,10 @@ import proguard.gradle.ProGuardTask
 plugins {
     java
     application
-    id("org.jetbrains.kotlin.jvm") version "2.1.20-RC"
-    id("org.jetbrains.kotlin.plugin.allopen") version "2.1.20-RC"
-    id("com.google.devtools.ksp") version "2.1.20-RC-1.0.30"
+    kotlin("jvm") version "2.1.20-RC"
+    kotlin("plugin.allopen") version "2.1.20-RC"
+    kotlin("plugin.compose") version "2.1.20-RC"
+    id("org.jetbrains.compose") version "1.8.0-alpha03"
     id("com.github.johnrengelman.shadow") version "8.1.1"
     id("org.graalvm.buildtools.native") version "0.10.5"
     id("com.gradleup.gr8") version "0.11.2"
@@ -27,38 +29,51 @@ version = "0.1"
 group = "elidemin.dev.elide"
 
 val kotlinVersion = properties["kotlinVersion"] as String
+val atomicfuVersion = "0.27.0"
 val kotlinxCoroutines = "1.10.1"
+val kotlinxSerialization = "1.8.0"
 val nettyVersion = "4.1.118.Final"
 val micrometerVersion = "1.1.2"
 val jacksonVersion = "2.18.2"
 val graalvmVersion = "24.1.2"
 val pklVersion = "0.28.0-SNAPSHOT"
 val cliktVersion = "5.0.3"
+val mordantVersion = "3.0.2"
+val mosaicVersion = "0.16.0"
+val composeVersion = "1.8.0-alpha03"
 val jvmToolchain = 23
 val jvmTarget = jvmToolchain
 val kotlinTarget = JvmTarget.JVM_23
 val javaTarget = JavaLanguageVersion.of(jvmToolchain)
 val jvmTargetVersion = JavaVersion.toVersion(jvmTarget)
 val march = "x86-64-v4"
-val optMode = "s"
+val optMode = "2"
+val nativeOptMode = "3"
 
 fun JavaToolchainSpec.javaToolchainSuite() {
     languageVersion = javaTarget
     vendor = JvmVendorSpec.ORACLE
 }
 
-val enablePgo = false
+val enablePgo = true
+val enableNativePgo = false
+val enableMosaic = false
+val enableCompose = true
 val enablePgoInstrument = false
+val enableNativePgoInstrument = false
 val enablePkl = true
 val enableIsolates = false
-val enableJsIsolates = false
+val enablePreinit = true
+val enablePreinitJs = true
+val enablePreinitPython = true
+val enableJsIsolates = true
 val enablePythonIsolates = false
 val strict = false
 val enableClang = false
 val enableLlvm = false
 val enableGccEdge = true
 val enableSbom = true
-val enableMinifier = true
+val enableMinifier = false
 val enableDualMinify = true
 val enableLld = enableClang
 val enableMold = true
@@ -116,7 +131,6 @@ val proguardRules = listOf(
 
 val javacFlags = listOf(
     "--enable-preview",
-    "--add-modules=jdk.incubator.vector",
     "--add-modules=jdk.unsupported",
     "--add-modules=java.net.http",
     "-da",
@@ -133,18 +147,36 @@ val isolates = (when {
     else -> null
 })
 
-val jvmDefs = listOfNotNull(
+val preinitializedContexts = buildList {
+    if (enablePreinit && enablePreinitJs) add("js")
+    if (enablePreinit && enablePreinitPython) add("python")
+}.joinToString(",")
+
+val globalizedJvmDefs = listOf(
+    "org.graalvm.supporturl" to "https://elide.dev",
+    "org.graalvm.vendor" to "Elide (GraalVM)",
+)
+
+val jvmDefs = globalizedJvmDefs.plus(listOf(
     "polyglotimpl.DisableVersionChecks" to "false",
-    "polyglot.image-build-time.PreinitializeContexts" to "js,python",
-    "polyglot.image-build-time.PreinitializeContextsWithNative" to "true",
     "polyglot.engine.SpawnIsolate" to isolates,
+    "polyglot.engine.WarnOptionDeprecation" to "false",
+    "polyglot.engine.AllowExperimentalOptions" to "true",
+    "polyglot.image-build-time.AllowExperimentalOptions" to "true",
     "elide.pkl" to enablePkl.toString(),
     "elide.isolates" to isolates,
-).toMap().also {
+    "elide.preinit" to preinitializedContexts,
+    "elide.auxcache" to enableAuxCache.toString(),
+    "elide.auxcache.trace" to "false",
+)).filter { it.second?.ifEmpty { null }?.ifBlank { null } != null }.toMap().also {
     if (enableJsIsolates && enablePythonIsolates) error(
         "Cannot enable both JS and Python isolates"
     )
-}
+}.plus(if (enablePreinit) mapOf(
+    "polyglot.engine.PreinitializeContexts" to preinitializedContexts,
+    "polyglot.image-build-time.PreinitializeContexts" to preinitializedContexts,
+    "polyglot.image-build-time.PreinitializeContextsWithNative" to "true",
+) else emptyMap())
 
 val jvmFlags = javacFlags.plus(listOf(
     "--enable-native-access=ALL-UNNAMED",
@@ -220,10 +252,43 @@ val nativeLinker = when {
     else -> "ld"
 }
 
+val stdNativeFlags = listOf(
+    "-ffast-math",
+    "-fno-omit-frame-pointer",
+)
+
+val clangFlags = stdNativeFlags.plus(listOf())
+
+val gccFlags = stdNativeFlags.plus(listOf(
+    "-fmerge-all-constants",
+    "-fgcse-sm",
+    "-fgcse-las",
+    "-funsafe-loop-optimizations",
+    "-fno-semantic-interposition",
+    "-fipa-pta",
+    "-fipa-icf",
+    "-fno-fat-lto-objects",
+    "-fstack-protector",
+)).plus(
+    when {
+        enableNativePgoInstrument -> listOf(
+            "-fprofile-generate=elide-native.prof",
+            "-fprofile-arcs",
+        )
+        enableNativePgo -> listOf(
+            "-fbranch-probabilities",
+        )
+        else -> emptyList()
+    }
+)
+
 val nativeCompileFlags = listOf(
-    "-Os",
     "-flto",
+    "-O$nativeOptMode",
     "-fuse-ld=$nativeLinker",
+    "-fuse-linker-plugin",
+).plus(
+    if (enableClang) clangFlags else gccFlags
 )
 
 val nativeLinkerFlags = listOf(
@@ -241,6 +306,9 @@ val experimentalFlags = listOf(
     "-H:+UseThinLocking",
     "-H:+UseStringInlining",
     "-H:+RemoveUnusedSymbols",
+    "-H:-ParseRuntimeOptions",
+    "-H:+VMContinuations",
+    "-H:+JNIEnhancedErrorCodes",
     "-R:+WriteableCodeCache",
     "-H:LocalizationCompressBundles='.*'",
     "-H:+InlineGraalStubs",
@@ -250,15 +318,11 @@ val experimentalFlags = listOf(
     "-H:+ReduceCodeSize",
     "-H:+ProtectionKeys",
     "-H:CFI=SW_NONATIVE",
-    //
     "-H:+ForeignAPISupport",
     "-H:+LocalizationOptimizedMode",
-    "-H:-BuildOutputRecommendations",
+    "-H:+BuildOutputRecommendations",
     "-H:-ReduceImplicitExceptionStackTraceInformation",
     "-H:CStandard=C11",
-    //
-    // "-H:+SupportRuntimeClassLoading",
-    // "-H:-ClosedTypeWorld",
 ).plus(
     if (jvmTarget > 24) listOf(
         "-H:+VectorAPISupport",
@@ -275,10 +339,10 @@ val gvmFlags = (if (enablePgo) listOf(
         "-O$optMode",
     )
 }).plus(listOf(
-    "--trace-object-instantiation=java.util.concurrent.ForkJoinWorkerThread",
     "--gc=$gc",
     "-march=$march",
     "--verbose",
+    "--add-modules=jdk.incubator.vector",
     "--initialize-at-build-time",
     "--link-at-build-time=elidemin",
     "--link-at-build-time=kotlin",
@@ -289,6 +353,7 @@ val gvmFlags = (if (enablePgo) listOf(
     "--emit=build-report",
     "-H:+UnlockExperimentalVMOptions",
     "-H:+UseCompressedReferences",
+    "-H:+PreserveFramePointer",
     "-H:IncludeResources=org/graalvm/shadowed/com/ibm/icu/ICUConfig.properties",
     "-H:+CopyLanguageResources",
     "--static-nolibc",
@@ -317,17 +382,10 @@ val gvmFlags = (if (enablePgo) listOf(
     }
 )
 
-val truffle: Configuration by configurations.creating {
-    isCanBeResolved = true
-}
-
-val pkl: Configuration by configurations.creating {
-    isCanBeResolved = true
-}
-
-val unshaded: Configuration by configurations.creating {
-    isCanBeResolved = true
-}
+val jvmOnly: Configuration by configurations.creating { isCanBeResolved = true }
+val truffle: Configuration by configurations.creating { isCanBeResolved = true }
+val pkl: Configuration by configurations.creating { isCanBeResolved = true }
+val unshaded: Configuration by configurations.creating { isCanBeResolved = true }
 
 fun extendsBaseClasspath(configuration: Configuration) {
     configurations.compileClasspath.extendsFrom(
@@ -348,10 +406,22 @@ fun ExternalModuleDependency.truffleExclusions() {
 }
 
 dependencies {
-    implementation("com.github.ajalt.clikt:clikt:$cliktVersion")
+    implementation("com.github.ajalt.clikt:clikt:$cliktVersion") {
+        exclude(group = "com.github.ajalt.mordant", module = "mordant-jvm-ffm")
+    }
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlinVersion")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$kotlinxCoroutines")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:$kotlinxCoroutines")
+    implementation("org.jetbrains.kotlinx:atomicfu-jvm:$atomicfuVersion")
     compileOnly("org.graalvm.nativeimage:svm:$graalvmVersion")
+
+    if (enableCompose) {
+        implementation("org.jetbrains.compose.runtime:runtime:$composeVersion")
+    }
+    if (enableCompose && enableMosaic) {
+        implementation("com.jakewharton.mosaic:mosaic-runtime:$mosaicVersion")
+    }
+
+    jvmOnly("com.github.ajalt.mordant:mordant-jvm-ffm:$mordantVersion")
 
     truffle("org.graalvm.python:python-language:$graalvmVersion")
     truffle("org.graalvm.js:js-language:$graalvmVersion")
@@ -392,6 +462,10 @@ configurations.all {
     exclude(group = "org.graalvm.polyglot", module = "python-isolate-windows-amd64")
     exclude(group = "org.graalvm.polyglot", module = "python-isolate-darwin-amd64")
     exclude(group = "org.graalvm.polyglot", module = "python-isolate-darwin-aarch64")
+
+    if (name != "jvmOnly") {
+        exclude(group = "com.github.ajalt.mordant", module = "mordant-jvm-ffm")
+    }
 }
 
 application {
@@ -407,8 +481,8 @@ java {
 
 kotlin {
     compilerOptions {
-        apiVersion = KotlinVersion.KOTLIN_2_3
-        languageVersion = KotlinVersion.KOTLIN_2_3
+        apiVersion = KotlinVersion.KOTLIN_2_1
+        languageVersion = KotlinVersion.KOTLIN_2_1
         jvmTarget = kotlinTarget
         javaParameters = true
         allWarningsAsErrors = strict
@@ -418,7 +492,21 @@ kotlin {
     }
 }
 
+composeCompiler {
+    includeSourceInformation = true
+
+    featureFlags.addAll(setOf(
+        ComposeFeatureFlag.StrongSkipping,
+        ComposeFeatureFlag.IntrinsicRemember,
+        ComposeFeatureFlag.PausableComposition,
+        ComposeFeatureFlag.OptimizeNonSkippingGroups,
+    ))
+}
+
 tasks.shadowJar {
+    mergeServiceFiles()
+
+    exclude("module-info.class")
     exclusionPaths.forEach {
         exclude(it)
     }
@@ -430,9 +518,19 @@ val proguardedJar by tasks.registering(ProGuardTask::class) {
 
     configuration(files(*proguardRules.toTypedArray()))
 
-    val libJars = truffle.plus(unshaded).plus(pkl).files.distinct()
+    val libJars = truffle
+        .plus(unshaded)
+        .plus(pkl)
+        .files
+        .distinct()
+
+    val allInJars = listOf(tasks.jar.get().outputs.files.singleFile)
+        .plus(configurations.runtimeClasspath.get())
+        .filter { it !in libJars }
+        .distinct()
+
     dependsOn(tasks.jar)
-    injars(tasks.jar.get().outputs.files.singleFile)
+    injars(allInJars)
     libraryjars(libJars)
     val out = layout.buildDirectory.file("libs/${project.name}-proguarded.jar").get().asFile
     outjars(out)
@@ -443,7 +541,16 @@ val gr8MinifiedJar = gr8.create("minified") {
     r8Rules.forEach { proguardFile(layout.projectDirectory.file(it).asFile) }
     systemClassesToolchain(javac.get())
     r8Version("1.4.45")
-    addClassPathJarsFrom(truffle.plus(unshaded).plus(pkl).filter { it.extension != "pom" })
+    addClassPathJarsFrom(
+        provider {
+            truffle
+                .plus(unshaded)
+                .plus(pkl)
+                .plus(configurations.runtimeClasspath.get())
+                .filter { it.extension != "pom" }
+                .distinct()
+        }
+    )
 
     if (enableDualMinify) {
         addProgramJarsFrom(proguardedJar)
@@ -461,6 +568,7 @@ val minifiedJar by tasks.registering(Copy::class) {
             .outputs
             .files
             .filter { it.extension == "jar" }
+            .filter { !("jetbrains" in it.path && "annotations" in it.path) }
             .singleFile
     else
         proguardedJar.get().outputs.files.singleFile
@@ -527,10 +635,6 @@ graalvmNative {
 configurations.all {
     listOf(
         "com.github.ajalt.mordant:mordant-jvm-jna",
-        "com.github.ajalt.mordant:mordant-jvm-ffm",
-        // "org.apache.groovy:groovy-bom",
-        "com.fasterxml.jackson:jackson-bom",
-        "com.fasterxml.jackson.module:jackson-module-kotlin",
     ).forEach {
         val (grp, mod) = it.split(":")
         exclude(group = grp, module = mod)
@@ -541,6 +645,10 @@ configurations.all {
             useVersion(kotlinVersion)
             because("kotlin sdk pin")
         }
+        if (requested.group == "org.jetbrains" && requested.name == "annotations") {
+            useVersion("23.0.0")
+            because("solving duplicates")
+        }
     }
 }
 
@@ -550,6 +658,7 @@ tasks.test {
 
 tasks.named("run", JavaExec::class) {
     jvmArgs(jvmFlags)
+    classpath(configurations.runtimeClasspath, jvmOnly)
 }
 
 tasks.withType<JavaCompile>().configureEach {

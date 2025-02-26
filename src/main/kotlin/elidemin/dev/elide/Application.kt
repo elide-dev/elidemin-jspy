@@ -1,9 +1,12 @@
 @file:Suppress(
     "UNUSED",
+    "NOTHING_TO_INLINE",
 )
 
 package elidemin.dev.elide
 
+import com.github.ajalt.clikt.command.SuspendingCliktCommand
+import com.github.ajalt.clikt.command.main
 import com.github.ajalt.clikt.core.*
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.multiple
@@ -12,12 +15,15 @@ import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.path
 import com.github.ajalt.clikt.parameters.types.uint
+// import com.jakewharton.mosaic.runMosaicBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.graalvm.nativeimage.ImageInfo
 import org.graalvm.polyglot.Context
 import org.graalvm.polyglot.Engine
 import org.graalvm.polyglot.SandboxPolicy
 import org.graalvm.polyglot.Source
 import java.nio.file.Path
-import java.util.function.Supplier
 import javax.tools.ToolProvider
 
 private val languages = arrayOf(
@@ -25,7 +31,7 @@ private val languages = arrayOf(
     "python",
 )
 
-sealed class Command(protected val ctx: AppContext, name: String) : CliktCommand(name)
+sealed class Command(protected val ctx: AppContext, name: String) : SuspendingCliktCommand(name)
 
 class Python (ctx: AppContext): Command(ctx, "py") {
     init {
@@ -99,11 +105,14 @@ class Python (ctx: AppContext): Command(ctx, "py") {
     // Scripts and arguments
     private val args by argument(help = "arguments to pass").multiple().optional()
 
-    override fun run() {
+    override suspend fun run() {
         val url = src.toUri()
         val source = Source.newBuilder("python", url.toURL()).build()
-        val result = ctx.context.get().eval(source)
-        echo(result.toString())
+        ctx.useGuestContext {
+            eval(source).also {
+                echo(it.toString())
+            }
+        }
     }
 }
 
@@ -115,11 +124,14 @@ class JavaScript (ctx: AppContext): Command(ctx, "js") {
         mustBeReadable = true,
     )
 
-    override fun run() {
+    override suspend fun run() {
         val url = src.toUri()
         val source = Source.newBuilder("js", url.toURL()).build()
-        val result = ctx.context.get().eval(source)
-        echo(result.toString())
+        ctx.useGuestContext {
+            eval(source).also {
+                echo(it.toString())
+            }
+        }
     }
 }
 
@@ -203,7 +215,7 @@ class JavaCompiler (ctx: AppContext) : Command(ctx, "javac") {
     // Source files to compile
     private val sourceFiles by argument().multiple()
 
-    override fun run() {
+    override suspend fun run() {
         // In a real implementation, this would invoke the Java compiler
 
         if (version) {
@@ -267,7 +279,7 @@ class JarTool (ctx: AppContext) : Command(ctx, "jar") {
     // Additional arguments
     private val arguments by argument().multiple().optional()
 
-    override fun run() {
+    override suspend fun run() {
         // In a real implementation, this would invoke the jar tool
 
         // Check for a valid operation mode
@@ -298,7 +310,7 @@ class JarTool (ctx: AppContext) : Command(ctx, "jar") {
 }
 
 class KotlinCompiler (ctx: AppContext): Command(ctx, "kotlinc") {
-    override fun run() {
+    override suspend fun run() {
         TODO("not yet supported")
     }
 }
@@ -306,18 +318,26 @@ class KotlinCompiler (ctx: AppContext): Command(ctx, "kotlinc") {
 class Hello (ctx: AppContext) : Command(ctx, "hello") {
 	private val debug by option(help = "enable debug").flag()
     private val count by option(help = "number of times to print").uint().default(3u)
+    private val jest by option(help = "jest").flag()
 
-    override fun run() {
+    override suspend fun run() {
         if (debug) {
             echo("debug mode active")
         }
         repeat(count.toInt()) {
             echo("Hello world!")
         }
+//        if (jest) runMosaicBlocking {
+//            renderJestSample()
+//        }
     }
 }
 
-class Entry : NoOpCliktCommand("elide")
+class Entry : SuspendingCliktCommand("elide") {
+    override suspend fun run() {
+        // no-op
+    }
+}
 
 ///
 
@@ -329,7 +349,6 @@ private val enableEngineFlags: List<String> = listOf(
     "engine.MultiTier",
     "engine.Splitting",
     "engine.OSR",
-    "engine.CachePreinitializeContext",
     "compiler.Inlining",
     "compiler.EncodedGraphCache",
     "compiler.InlineAcrossTruffleBoundary",
@@ -337,7 +356,13 @@ private val enableEngineFlags: List<String> = listOf(
 
 // Flags mapped to values on the engine.
 private val engineFlagValues: Map<String, String> = mapOf(
-    "engine.Cache" to "./aux-img.bin",
+    "engine.WarnOptionDeprecation" to "false",
+    "engine.PreinitializeContexts" to System.getProperty("elide.preinit", ""),
+).plus(
+    if (java.lang.Boolean.getBoolean("elide.auxcache") && ImageInfo.inImageCode()) mapOf(
+        "engine.Cache" to "/tmp/elide-auxcache.bin",
+        "engine.TraceCache" to java.lang.Boolean.getBoolean("elide.auxcache.trace").toString(),
+    ) else emptyMap()
 )
 
 private const val binhome = "/home/sam/workspace/labs/gvm-min/elidemin-purekt-truffle/build/native/nativeOptimizedCompile"
@@ -410,22 +435,39 @@ private val contextFlagValues = mapOf(
     "python.StdLibHome" to "$resources/python/python-home/lib/python$pythonVersion",
 )
 
+private inline fun doSafeOption(name: String, value: String, setter: (String, String) -> Unit) {
+    try {
+        setter(name, value)
+    } catch (iae: IllegalArgumentException) {
+        println("warn: option '${name}' is not valid or unavailable")
+    }
+}
+
+private inline fun Engine.Builder.safeOption(name: String, value: String) =
+    doSafeOption(name, value, this::option)
+
+private inline fun Context.Builder.safeOption(name: String, value: String) =
+    doSafeOption(name, value, this::option)
+
 // Singleton engine.
 private val globalEngine by lazy {
-    Engine.newBuilder(*languages)
+    Engine.newBuilder()
         .allowExperimentalOptions(true)
         .sandbox(SandboxPolicy.TRUSTED)
         .apply {
-            enableEngineFlags.forEach { option(it, "true") }
-            engineFlagValues.forEach { option(it.key, it.value) }
+            enableEngineFlags.forEach { safeOption(it, "true") }
+            engineFlagValues.forEach { safeOption(it.key, it.value) }
         }
         .build()
 }
 
-// Singleton context.
-private val globalContext by lazy {
-    Context.newBuilder(*languages)
-        .engine(globalEngine)
+val globalEngineSupplier = { langs: Array<String> -> globalEngine }
+
+fun createEmptyContextBuilder(
+    lang: Array<String> = languages,
+    engineGetter: (Array<String>) -> Engine = globalEngineSupplier,
+): Context.Builder =
+    Context.newBuilder(*lang)
         .allowAllAccess(true)
         .allowNativeAccess(true)
         .allowCreateThread(true)
@@ -434,26 +476,70 @@ private val globalContext by lazy {
         .allowHostClassLoading(true)
         .allowExperimentalOptions(true)
         .apply {
-            enableContextFlags.forEach { option(it, "true") }
-            contextFlagValues.forEach { option(it.key, it.value) }
+            enableContextFlags.forEach { safeOption(it, "true") }
+            contextFlagValues.filter {
+                when {
+                    it.key.startsWith("js.") -> lang.contains("js")
+                    it.key.startsWith("python.") -> lang.contains("python")
+                    else -> true
+                }
+            }.forEach {
+                safeOption(it.key, it.value)
+            }
         }
-        .build()
+        .apply {
+            engine(engineGetter.invoke(lang))
+        }
+
+// Singleton context.
+private val globalContext by lazy {
+    createEmptyContextBuilder().build()
 }
 
-sealed interface AppContext {
-    val engine: Supplier<Engine>
-    val context: Supplier<Context>
+sealed interface AppContextAPI {
+    val engine: (Array<String>) -> Engine
+    val context: (Context.Builder) -> Context
 }
 
-class AppContextImpl (
-    override val engine: Supplier<Engine> = Supplier { globalEngine },
-    override val context: Supplier<Context> = Supplier { globalContext },
-) : AppContext
+typealias ContextBuilder = Context.Builder.() -> Unit
 
-fun main(args: Array<String>) {
-    val ctx = AppContextImpl()
+class AppContext (
+    override val engine: (Array<String>) -> Engine = globalEngineSupplier,
+    override val context: (Context.Builder?) -> Context = { _: Context.Builder? -> globalContext },
+) : AppContextAPI {
+    suspend inline fun <R> useGuestContext(crossinline block: suspend Context.() -> R): R = withGuestContext {
+        use { block() }
+    }
 
-    val commands = mutableListOf(
+    suspend inline fun <R> useGuestContext(
+        crossinline builder: ContextBuilder,
+        crossinline block: suspend Context.() -> R,
+    ): R = withGuestContext(builder) {
+        use { block() }
+    }
+
+    suspend inline fun <R> withGuestContext(crossinline block: suspend Context.() -> R): R =
+        withGuestContext({ /* no-op */ }, block)
+
+    suspend inline fun <R> withGuestContext(
+        crossinline builder: ContextBuilder,
+        crossinline block: suspend Context.() -> R,
+    ): R = withContext(Dispatchers.Engine) {
+        val ctxBuilder = createEmptyContextBuilder()
+        val ctx = context.invoke(ctxBuilder.apply(builder))
+        ctx.enter()
+
+        try {
+            block.invoke(ctx)
+        } finally {
+            ctx.leave()
+        }
+    }
+}
+
+suspend fun main(args: Array<String>) = withContext(Dispatchers.Default) {
+    val ctx = AppContext()
+    val commands = mutableListOf<SuspendingCliktCommand>(
         Hello(ctx),
         JavaScript(ctx),
         Python(ctx),
@@ -462,9 +548,21 @@ fun main(args: Array<String>) {
         KotlinCompiler(ctx),
     )
 
-    Entry()
-        .subcommands(
-            *commands.toTypedArray()
-        )
-        .main(args)
+    try {
+        globalEngine.use {
+            globalContext.use {
+                withContext(Dispatchers.Virtual) {
+                    Entry()
+                        .subcommands(
+                            *commands.toTypedArray()
+                        )
+                        .main(args)
+                }
+            }
+        }
+    } catch (iae: IllegalArgumentException) {
+        if (iae.message?.contains("is experimental and must be enabled with") == true) {
+            println("warn: invalid option prevented image persist; message: ${iae.message}")
+        }
+    }
 }

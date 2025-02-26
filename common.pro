@@ -1,3 +1,4 @@
+-keep public class kotlinx.coroutines.** { *; }
 -keep public class com.github.ajalt.clikt.** { *; }
 -keep public class com.oracle.truffle.regex.chardata.UnicodeCharacterAliases { *; }
 -keep public class org.pkl.core.runtime.VmFileDetector { *; }
