@@ -1,3 +1,5 @@
+#!/bin/bash
+
 WARMUPS="10"
 RUNS="25"
 

@@ -154,7 +154,7 @@ class Python (ctx: AppContext): Command(ctx, "py") {
         Statics.disableEngineAuxiliaryCache()
         val url = src.toUri()
         val source = Source.newBuilder("python", url.toURL()).build()
-        ctx.useGuestContext {
+        ctx.useGuestContext(isolatedEngine = false) {
             eval(source).also {
                 echo(it.toString())
             }
@@ -396,20 +396,28 @@ class Entry : SuspendingCliktCommand("elide") {
 // Flags to enable on the engine.
 private val enableEngineFlags: List<String> = listOf()
 
+// Whether to enable the auxiliary cache.
+private val enableAuxCache = System.getProperty("elide.auxcache") != "false"
+private val enableAuxCacheTracing = java.lang.Boolean.getBoolean("elide.auxcache.trace")
+
+// Languages to pre-initialize.
+private val preinitLangs = System.getProperty("elide.preinit", "js,python")
+
 // Flags mapped to values on the engine.
-private val engineFlagValues: Map<String, String> by lazy {
-    mapOf(
+private fun engineFlagValues(forceDisableAuxCache: Boolean = false): Map<String, String> {
+    return mapOf(
         "engine.WarnOptionDeprecation" to "false",
         "engine.WarnVirtualThreadSupport" to "false",
-        "engine.PreinitializeContexts" to System.getProperty("elide.preinit", ""),
     ).plus(
         if (
-            java.lang.Boolean.getBoolean("elide.auxcache") &&
+            !forceDisableAuxCache &&
+            enableAuxCache &&
             ImageInfo.inImageCode() &&
             Statics.auxCacheEnabled()
         ) mapOf(
+            "engine.PreinitializeContexts" to preinitLangs,
             "engine.Cache" to "/tmp/elide-auxcache.bin",
-            "engine.TraceCache" to java.lang.Boolean.getBoolean("elide.auxcache.trace").toString(),
+            "engine.TraceCache" to enableAuxCacheTracing.toString(),
         ) else emptyMap()
     )
 }
@@ -418,7 +426,7 @@ object Statics {
     private var allArgs: Array<String>? = null
     private val initialized = atomic(false)
     private val ctx = atomic<AppContext?>(null)
-    private val auxCache = atomic(false)
+    private val auxCache = atomic(true)
 
     const val pythonVersion = "3.11"
     const val graalPyVersion = "24.1"
@@ -439,6 +447,10 @@ object Statics {
         binaryPath.parent.resolve("resources")
     }
 
+    fun requireInitialized() {
+        check(initialized.value) { "Statics not initialized" }
+    }
+
     fun initialize(args: Array<String>, activeCtx: AppContext) {
         if (initialized.compareAndSet(expect = false, update = true)) {
             allArgs = args
@@ -446,11 +458,11 @@ object Statics {
         }
     }
 
-    fun disableEngineAuxiliaryCache() {
-        auxCache.value = true
+    @Synchronized fun disableEngineAuxiliaryCache() {
+        auxCache.value = false
     }
 
-    fun auxCacheEnabled() = auxCache.value
+    @Synchronized fun auxCacheEnabled() = auxCache.value
 }
 
 // Flags to enable on the context.
@@ -505,11 +517,11 @@ private val contextFlagValues by lazy {
         "js.debug-property-name" to "Debug",
         "js.ecmascript-version" to "2024",
         "js.unhandled-rejections" to "throw",
-        "python.HPyBackend" to "JNI",
-        "python.PosixModuleBackend" to "native",
-        "python.Sha3ModuleBackend" to "native",
-        "python.UseNativePrimitiveStorageStrategy" to "true",
-        "python.WarnExperimentalFeatures" to "false",
+//        "python.HPyBackend" to "JNI",
+//        "python.PosixModuleBackend" to "native",
+//        "python.Sha3ModuleBackend" to "native",
+//        "python.UseNativePrimitiveStorageStrategy" to "true",
+//        "python.WarnExperimentalFeatures" to "false",
         "python.CoreHome" to "${Statics.resourcesPath}/python/python-home/lib/graalpy${Statics.graalPyVersion}",
         "python.SysPrefix" to "${Statics.resourcesPath}/python/python-home/lib/graalpy${Statics.graalPyVersion}",
         "python.CAPI" to "${Statics.resourcesPath}/python/python-home/lib/graalpy${Statics.graalPyVersion}",
@@ -532,23 +544,27 @@ private inline fun Engine.Builder.safeOption(name: String, value: String) =
 private inline fun Context.Builder.safeOption(name: String, value: String) =
     doSafeOption(name, value, this::option)
 
-// Singleton engine.
-private val globalEngine by lazy {
-    Engine.newBuilder()
+// Configure an engine instance.
+private inline fun configureEngine(langs: Array<String>): Engine.Builder {
+    Statics.requireInitialized()
+
+    return (if (langs.isEmpty()) Engine.newBuilder() else Engine.newBuilder(*langs))
         .allowExperimentalOptions(true)
         .sandbox(SandboxPolicy.TRUSTED)
         .apply {
             enableEngineFlags.forEach { safeOption(it, "true") }
-            engineFlagValues.forEach { safeOption(it.key, it.value) }
+            engineFlagValues().forEach { safeOption(it.key, it.value) }
         }
-        .build()
 }
 
-val globalEngineSupplier = { langs: Array<String> -> globalEngine }
+// Singleton engine.
+private inline fun createEngine(langs: Array<String>): Engine = configureEngine(langs).build()
 
 fun createEmptyContextBuilder(
     lang: Array<String> = languages,
-    engineGetter: (Array<String>) -> Engine = globalEngineSupplier,
+    engineGetter: (Array<String>) -> Engine = { _ -> globalEngine },
+    engine: Engine? = null,
+    attachEngine: Boolean = true,
 ): Context.Builder =
     Context.newBuilder(*lang)
         .allowIO(IOAccess.ALL)
@@ -572,12 +588,21 @@ fun createEmptyContextBuilder(
             }
         }
         .apply {
-            engine(engineGetter.invoke(lang))
+            if (attachEngine) {
+                engine(engine ?: engineGetter.invoke(lang))
+            }
         }
 
+// Singleton engine.
+val globalEngine by lazy {
+    Statics.requireInitialized()
+    createEngine(languages)
+}
+
 // Singleton context.
-private val globalContext by lazy {
-    createEmptyContextBuilder().build()
+val globalContext by lazy {
+    Statics.requireInitialized()
+    createEmptyContextBuilder(attachEngine = false).build()
 }
 
 sealed interface AppContextAPI {
@@ -588,10 +613,17 @@ sealed interface AppContextAPI {
 typealias ContextBuilder = Context.Builder.() -> Unit
 
 class AppContext (
-    override val engine: (Array<String>) -> Engine = globalEngineSupplier,
+    override val engine: (Array<String>) -> Engine = ::createEngine,
     override val context: (Context.Builder?) -> Context = { _: Context.Builder? -> globalContext },
 ) : AppContextAPI {
     suspend inline fun <R> useGuestContext(crossinline block: suspend Context.() -> R): R = withGuestContext {
+        use { block() }
+    }
+
+    suspend inline fun <R> useGuestContext(
+        isolatedEngine: Boolean,
+        crossinline block: suspend Context.() -> R
+    ): R = withGuestContext(isolatedEngine = isolatedEngine) {
         use { block() }
     }
 
@@ -602,21 +634,44 @@ class AppContext (
         use { block() }
     }
 
-    suspend inline fun <R> withGuestContext(crossinline block: suspend Context.() -> R): R =
-        withGuestContext({ /* no-op */ }, block)
+    suspend inline fun <R> useGuestContext(
+        isolatedEngine: Boolean,
+        crossinline builder: ContextBuilder,
+        crossinline block: suspend Context.() -> R,
+    ): R = withGuestContext(builder, isolatedEngine) {
+        use { block() }
+    }
+
+    suspend inline fun <R> withGuestContext(
+        isolatedEngine: Boolean = true,
+        crossinline block: suspend Context.() -> R
+    ): R = withGuestContext({ /* no-op */ }, isolatedEngine, block)
 
     suspend inline fun <R> withGuestContext(
         crossinline builder: ContextBuilder,
+        isolatedEngine: Boolean = true,
         crossinline block: suspend Context.() -> R,
     ): R = withContext(Dispatchers.Engine) {
-        val ctxBuilder = createEmptyContextBuilder()
-        val ctx = context.invoke(ctxBuilder.apply(builder))
-        ctx.enter()
-
+        val engine = when (isolatedEngine) {
+            true -> engine(emptyArray())
+            false -> globalEngine
+        }
+        val ctxBuilder = createEmptyContextBuilder(
+            attachEngine = true,
+            engine = engine,
+        )
         try {
-            block.invoke(ctx)
+            context.invoke(ctxBuilder.apply(builder)).use { ctx ->
+                ctx.enter()
+
+                try {
+                    block.invoke(ctx)
+                } finally {
+                    ctx.leave()
+                }
+            }
         } finally {
-            ctx.leave()
+            engine.close()
         }
     }
 }
@@ -630,7 +685,9 @@ fun main(args: Array<String>) {
         "polyglot.engine.WarnVirtualThreadSupport",
         "false",
     )
+
     val ctx = AppContext()
+
     Statics.initialize(
         args,
         ctx,
@@ -646,15 +703,11 @@ fun main(args: Array<String>) {
 
     runBlocking(Dispatchers.Default) {
         try {
-            globalEngine.use {
-                globalContext.use {
-                    Entry()
-                        .subcommands(
-                            *commands.toTypedArray()
-                        )
-                        .main(args)
-                }
-            }
+            Entry()
+                .subcommands(
+                    *commands.toTypedArray()
+                )
+                .main(args)
         } catch (iae: IllegalArgumentException) {
             if (iae.message?.contains("is experimental and must be enabled with") == true) {
                 iae.printStackTrace()
