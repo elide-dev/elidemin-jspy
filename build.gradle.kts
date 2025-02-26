@@ -360,6 +360,8 @@ val gvmFlags = (if (enablePgo) listOf(
     "--gc=$gc",
     "-march=$march",
     "--verbose",
+    "--static",
+    "--libc=musl",
     "--add-modules=jdk.incubator.vector",
     "--initialize-at-build-time",
     "--link-at-build-time=elidemin",
@@ -375,7 +377,7 @@ val gvmFlags = (if (enablePgo) listOf(
     "-H:IncludeResources=org/graalvm/shadowed/com/ibm/icu/ICUConfig.properties",
     "-H:+CopyLanguageResources",
     "-H:+RemoveUnusedSymbols",
-    "--static-nolibc",
+    // "--static-nolibc",
     "--exact-reachability-metadata",
     "--native-compiler-path=$nativeCompilerPath",
 )).plus(nativeCompileFlags.map {
@@ -403,7 +405,6 @@ val gvmFlags = (if (enablePgo) listOf(
 )
 
 val jvmOnly: Configuration by configurations.creating { isCanBeResolved = true }
-
 val pkl: Configuration by configurations.creating { isCanBeResolved = true }
 val unshaded: Configuration by configurations.creating { isCanBeResolved = true }
 
@@ -446,6 +447,7 @@ dependencies {
         implementation("com.jakewharton.mosaic:mosaic-runtime:$mosaicVersion")
     }
 
+    nativeImageCompileOnly("com.github.ajalt.mordant:mordant-jvm-graal-ffi:$mordantVersion")
     jvmOnly("com.github.ajalt.mordant:mordant-jvm-ffm:$mordantVersion")
 
     truffle("org.graalvm.python:python-language:$graalvmVersion")
