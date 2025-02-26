@@ -15,14 +15,15 @@ import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.path
 import com.github.ajalt.clikt.parameters.types.uint
+import kotlinx.atomicfu.atomic
 // import com.jakewharton.mosaic.runMosaicBlocking
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.graalvm.nativeimage.ImageInfo
+import org.graalvm.polyglot.*
 import org.graalvm.polyglot.Context
-import org.graalvm.polyglot.Engine
-import org.graalvm.polyglot.SandboxPolicy
-import org.graalvm.polyglot.Source
+import org.graalvm.polyglot.io.IOAccess
 import java.nio.file.Path
 import javax.tools.ToolProvider
 
@@ -106,6 +107,7 @@ class Python (ctx: AppContext): Command(ctx, "py") {
     private val args by argument(help = "arguments to pass").multiple().optional()
 
     override suspend fun run() {
+        Statics.disableEngineAuxiliaryCache()
         val url = src.toUri()
         val source = Source.newBuilder("python", url.toURL()).build()
         ctx.useGuestContext {
@@ -342,28 +344,25 @@ class Entry : SuspendingCliktCommand("elide") {
 ///
 
 // Flags to enable on the engine.
-private val enableEngineFlags: List<String> = listOf(
-    "engine.BackgroundCompilation",
-    "engine.UsePreInitializedContext",
-    "engine.Compilation",
-    "engine.MultiTier",
-    "engine.Splitting",
-    "engine.OSR",
-    "compiler.Inlining",
-    "compiler.EncodedGraphCache",
-    "compiler.InlineAcrossTruffleBoundary",
-)
+private val enableEngineFlags: List<String> = listOf()
 
 // Flags mapped to values on the engine.
-private val engineFlagValues: Map<String, String> = mapOf(
-    "engine.WarnOptionDeprecation" to "false",
-    "engine.PreinitializeContexts" to System.getProperty("elide.preinit", ""),
-).plus(
-    if (java.lang.Boolean.getBoolean("elide.auxcache") && ImageInfo.inImageCode()) mapOf(
-        "engine.Cache" to "/tmp/elide-auxcache.bin",
-        "engine.TraceCache" to java.lang.Boolean.getBoolean("elide.auxcache.trace").toString(),
-    ) else emptyMap()
-)
+private val engineFlagValues: Map<String, String> by lazy {
+    mapOf(
+        "engine.WarnOptionDeprecation" to "false",
+        "engine.WarnVirtualThreadSupport" to "false",
+        "engine.PreinitializeContexts" to System.getProperty("elide.preinit", ""),
+    ).plus(
+        if (
+            java.lang.Boolean.getBoolean("elide.auxcache") &&
+            ImageInfo.inImageCode() &&
+            Statics.auxCacheEnabled()
+        ) mapOf(
+            "engine.Cache" to "/tmp/elide-auxcache.bin",
+            "engine.TraceCache" to java.lang.Boolean.getBoolean("elide.auxcache.trace").toString(),
+        ) else emptyMap()
+    )
+}
 
 private const val binhome = "/home/sam/workspace/labs/gvm-min/elidemin-purekt-truffle/build/native/nativeOptimizedCompile"
 private const val binpath = "$binhome/labs"
@@ -371,69 +370,97 @@ private const val resources = "$binhome/resources"
 private const val pythonVersion = "3.11"
 private const val graalPyVersion = "24.1"
 
+object Statics {
+    private var allArgs: Array<String>? = null
+    private val initialized = atomic(false)
+    private val ctx = atomic<AppContext?>(null)
+    private val auxCache = atomic(false)
+    private val binaryPath by lazy {
+        if (ImageInfo.inImageCode()) {
+            ProcessHandle.current().info().command().orElse("labs")
+        } else {
+            binpath
+        }
+    }
+
+    fun initialize(args: Array<String>, activeCtx: AppContext) {
+        if (initialized.compareAndSet(expect = false, update = true)) {
+            allArgs = args
+            ctx.value = activeCtx
+        }
+    }
+
+    fun disableEngineAuxiliaryCache() {
+        auxCache.value = true
+    }
+
+    fun auxCacheEnabled() = auxCache.value
+}
+
 // Flags to enable on the context.
-private val enableContextFlags = listOf(
-    // ---- JavaScript ----------------
-    "js.allow-eval",
-    "js.atomics",
-    "js.class-fields",
-    "js.direct-byte-buffer",
-    "js.global-property",
-    "js.error-cause",
-    "js.foreign-hash-properties",
-    "js.foreign-object-prototype",
-    "js.import-attributes",
-    "js.intl-402",
-    "js.iterator-helpers",
-    "js.json-modules",
-    "js.lazy-translation",
-    "js.new-set-methods",
-    "js.performance",
-    "js.shared-array-buffer",
-    "js.strict",
-    "js.temporal",
-    "js.top-level-await",
-    // Experimental:
-    "js.async-context",
-    "js.async-iterator-helpers",
-    "js.async-stack-traces",
-    "js.annex-b",
-    "js.atomics-wait-async",
-    "js.bind-member-functions",
-    "js.esm-eval-returns-exports",
-    "js.scope-optimization",
-    "js.string-lazy-substrings",
-    "js.shadow-realm",
-    "js.zone-rules-based-time-zones",
-    // Enabled for use by polyfills or for experimental features:
-    "js.java-package-globals",
-    "js.graal-builtin",
-    "js.polyglot-evalfile",
-    "js.load",
-    "js.polyglot-builtin",
-    // ---- Python --------------------
-    "python.NativeModules",
-    "python.LazyStrings",
-    "python.WithTRegex",
-    "python.WithCachedSources",
-    "python.UsePanama",
-)
+private val enableContextFlags by lazy {
+    listOf(
+        // ---- JavaScript ----------------
+        "js.allow-eval",
+        "js.foreign-object-prototype",
+        "js.intl-402",
+        "js.strict",
+        // Experimental:
+        "js.iterator-helpers",
+        "js.import-attributes",
+        "js.performance",
+        "js.lazy-translation",
+        "js.json-modules",
+        "js.shared-array-buffer",
+        "js.error-cause",
+        "js.new-set-methods",
+        "js.foreign-hash-properties",
+        "js.temporal",
+        "js.atomics",
+        "js.class-fields",
+        "js.top-level-await",
+        "js.async-context",
+        "js.async-iterator-helpers",
+        "js.async-stack-traces",
+        "js.atomics-wait-async",
+        "js.bind-member-functions",
+        "js.esm-eval-returns-exports",
+        "js.string-lazy-substrings",
+        "js.zone-rules-based-time-zones",
+        "js.direct-byte-buffer",
+        // Enabled for use by polyfills or for experimental features:
+        "js.java-package-globals",
+        "js.graal-builtin",
+        "js.polyglot-evalfile",
+        "js.load",
+        "js.polyglot-builtin",
+        "js.global-property",
+        "js.shadow-realm",
+        "js.scope-optimization",
+        "js.annex-b",
+    )
+}
 
 // Flags mapped to values on the context.
-private val contextFlagValues = mapOf(
-    "js.timer-resolution" to "1",
-    "js.commonjs-require-cwd" to ".",
-    "js.debug-property-name" to "Debug",
-    "js.ecmascript-version" to "2024",
-    "js.unhandled-rejections" to "throw",
-    "python.HPyBackend" to "nfi",
-    "python.PosixModuleBackend" to "native",
-    "python.CoreHome" to "$resources/python/python-home/lib/graalpy$graalPyVersion",
-    "python.SysPrefix" to "$resources/python/python-home/lib/graalpy$graalPyVersion",
-    "python.CAPI" to "$resources/python/python-home/lib/graalpy$graalPyVersion",
-    "python.PythonHome" to "$resources/python/python-home",
-    "python.StdLibHome" to "$resources/python/python-home/lib/python$pythonVersion",
-)
+private val contextFlagValues by lazy {
+    mapOf(
+        "js.timer-resolution" to "1",
+        "js.commonjs-require-cwd" to ".",
+        "js.debug-property-name" to "Debug",
+        "js.ecmascript-version" to "2024",
+        "js.unhandled-rejections" to "throw",
+        "python.HPyBackend" to "JNI",
+        "python.PosixModuleBackend" to "native",
+        "python.Sha3ModuleBackend" to "native",
+        "python.UseNativePrimitiveStorageStrategy" to "true",
+        "python.WarnExperimentalFeatures" to "false",
+        "python.CoreHome" to "$resources/python/python-home/lib/graalpy$graalPyVersion",
+        "python.SysPrefix" to "$resources/python/python-home/lib/graalpy$graalPyVersion",
+        "python.CAPI" to "$resources/python/python-home/lib/graalpy$graalPyVersion",
+        "python.PythonHome" to "$resources/python/python-home",
+        "python.StdLibHome" to "$resources/python/python-home/lib/python$pythonVersion",
+    )
+}
 
 private inline fun doSafeOption(name: String, value: String, setter: (String, String) -> Unit) {
     try {
@@ -468,10 +495,11 @@ fun createEmptyContextBuilder(
     engineGetter: (Array<String>) -> Engine = globalEngineSupplier,
 ): Context.Builder =
     Context.newBuilder(*lang)
-        .allowAllAccess(true)
+        .allowIO(IOAccess.ALL)
+        .allowEnvironmentAccess(EnvironmentAccess.INHERIT)
+        .allowPolyglotAccess(PolyglotAccess.ALL)
+        .allowValueSharing(true)
         .allowNativeAccess(true)
-        .allowCreateThread(true)
-        .allowCreateProcess(true)
         .allowInnerContextOptions(true)
         .allowHostClassLoading(true)
         .allowExperimentalOptions(true)
@@ -537,8 +565,20 @@ class AppContext (
     }
 }
 
-suspend fun main(args: Array<String>) = withContext(Dispatchers.Default) {
+fun main(args: Array<String>) {
+    System.setProperty(
+        "polyglot.image-build-time.PreinitializeAllowExperimentalOptions",
+        "true"
+    )
+    System.setProperty(
+        "polyglot.engine.WarnVirtualThreadSupport",
+        "false",
+    )
     val ctx = AppContext()
+    Statics.initialize(
+        args,
+        ctx,
+    )
     val commands = mutableListOf<SuspendingCliktCommand>(
         Hello(ctx),
         JavaScript(ctx),
@@ -548,10 +588,10 @@ suspend fun main(args: Array<String>) = withContext(Dispatchers.Default) {
         KotlinCompiler(ctx),
     )
 
-    try {
-        globalEngine.use {
-            globalContext.use {
-                withContext(Dispatchers.Virtual) {
+    runBlocking(Dispatchers.Default) {
+        try {
+            globalEngine.use {
+                globalContext.use {
                     Entry()
                         .subcommands(
                             *commands.toTypedArray()
@@ -559,10 +599,13 @@ suspend fun main(args: Array<String>) = withContext(Dispatchers.Default) {
                         .main(args)
                 }
             }
-        }
-    } catch (iae: IllegalArgumentException) {
-        if (iae.message?.contains("is experimental and must be enabled with") == true) {
-            println("warn: invalid option prevented image persist; message: ${iae.message}")
+        } catch (iae: IllegalArgumentException) {
+            if (iae.message?.contains("is experimental and must be enabled with") == true) {
+                iae.printStackTrace()
+                println("warn: invalid option prevented image persist; message: ${iae.message}")
+            } else {
+                throw iae
+            }
         }
     }
 }

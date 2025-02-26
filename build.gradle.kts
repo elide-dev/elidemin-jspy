@@ -89,6 +89,16 @@ val entrypoint = "elidemin.dev.elide.ApplicationKt"
 
 val javac = javaToolchains.compilerFor { javaToolchainSuite() }
 val java = javaToolchains.launcherFor { javaToolchainSuite() }
+val gvmJarsRoot = rootProject.layout.projectDirectory
+
+val patchedLibs = files(
+    gvmJarsRoot.file("graaljs.jar"),
+    gvmJarsRoot.file("truffle-api.jar"),
+)
+
+val patched: Configuration by configurations.creating {
+    isCanBeResolved = true
+}
 
 val kotlincFlags = listOf(
     "-no-reflect",
@@ -158,16 +168,18 @@ val globalizedJvmDefs = listOf(
 )
 
 val jvmDefs = globalizedJvmDefs.plus(listOf(
+    "polyglot.engine.WarnVirtualThreadSupport" to "false",
     "polyglotimpl.DisableVersionChecks" to "false",
     "polyglot.engine.SpawnIsolate" to isolates,
     "polyglot.engine.WarnOptionDeprecation" to "false",
     "polyglot.engine.AllowExperimentalOptions" to "true",
+    "polyglot.image-build-time.Cache" to "/tmp/elide-auxcache.bin",
     "polyglot.image-build-time.AllowExperimentalOptions" to "true",
     "elide.pkl" to enablePkl.toString(),
     "elide.isolates" to isolates,
     "elide.preinit" to preinitializedContexts,
     "elide.auxcache" to enableAuxCache.toString(),
-    "elide.auxcache.trace" to "false",
+    "elide.auxcache.trace" to "true",
 )).filter { it.second?.ifEmpty { null }?.ifBlank { null } != null }.toMap().also {
     if (enableJsIsolates && enablePythonIsolates) error(
         "Cannot enable both JS and Python isolates"
@@ -176,6 +188,7 @@ val jvmDefs = globalizedJvmDefs.plus(listOf(
     "polyglot.engine.PreinitializeContexts" to preinitializedContexts,
     "polyglot.image-build-time.PreinitializeContexts" to preinitializedContexts,
     "polyglot.image-build-time.PreinitializeContextsWithNative" to "true",
+    "polyglot.image-build-time.PreinitializeAllowExperimentalOptions" to "true",
 ) else emptyMap())
 
 val jvmFlags = javacFlags.plus(listOf(
@@ -255,6 +268,9 @@ val nativeLinker = when {
 val stdNativeFlags = listOf(
     "-ffast-math",
     "-fno-omit-frame-pointer",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-fstack-protector",
 )
 
 val clangFlags = stdNativeFlags.plus(listOf())
@@ -268,7 +284,6 @@ val gccFlags = stdNativeFlags.plus(listOf(
     "-fipa-pta",
     "-fipa-icf",
     "-fno-fat-lto-objects",
-    "-fstack-protector",
 )).plus(
     when {
         enableNativePgoInstrument -> listOf(
@@ -294,35 +309,37 @@ val nativeCompileFlags = listOf(
 val nativeLinkerFlags = listOf(
     "-flto",
     "--emit-relocs",
+    "--gc-sections",
 )
 
 val experimentalFlags = listOf(
-    "-H:+VectorPolynomialIntrinsics",
-    "-H:+VectorPolynomialIntrinsics",
-    "-H:+OptimizeLongJumps",
-    "-R:+OptimizeLongJumps",
-    "-H:+LSRAOptimization",
-    "-R:+LSRAOptimization",
-    "-H:+UseThinLocking",
-    "-H:+UseStringInlining",
-    "-H:+RemoveUnusedSymbols",
-    "-H:-ParseRuntimeOptions",
-    "-H:+VMContinuations",
-    "-H:+JNIEnhancedErrorCodes",
-    "-R:+WriteableCodeCache",
-    "-H:LocalizationCompressBundles='.*'",
-    "-H:+InlineGraalStubs",
-    "-H:+ContextAwareInlining",
-    "-H:CompilerBackend=$compilerBackend",
-    "-H:SpectrePHTBarriers=NonDeoptGuardTargets",
-    "-H:+ReduceCodeSize",
-    "-H:+ProtectionKeys",
-    "-H:CFI=SW_NONATIVE",
-    "-H:+ForeignAPISupport",
-    "-H:+LocalizationOptimizedMode",
-    "-H:+BuildOutputRecommendations",
-    "-H:-ReduceImplicitExceptionStackTraceInformation",
+//    "-H:+VectorPolynomialIntrinsics",
+//    "-H:+VectorPolynomialIntrinsics",
+//    "-H:+OptimizeLongJumps",
+//    "-R:+OptimizeLongJumps",
+//    "-H:+LSRAOptimization",
+//    "-R:+LSRAOptimization",
+//    "-H:+UseThinLocking",
+//    "-H:+RemoveUnusedSymbols",
+//    "-H:-ParseRuntimeOptions",
+//    "-H:+JNIEnhancedErrorCodes",
+//    "-R:+WriteableCodeCache",
+//    "-H:LocalizationCompressBundles='.*'",
+//    "-H:+InlineGraalStubs",
+//    "-H:+ContextAwareInlining",
+//    "-H:CompilerBackend=$compilerBackend",
+//    "-H:SpectrePHTBarriers=NonDeoptGuardTargets",
+//    "-H:+ReduceCodeSize",
+//    "-H:+ProtectionKeys",
+//    "-H:CFI=SW_NONATIVE",
+//    "-H:+ForeignAPISupport",
+//    "-H:+LocalizationOptimizedMode",
+//    "-H:+BuildOutputRecommendations",
+//    "-H:-ReduceImplicitExceptionStackTraceInformation",
     "-H:CStandard=C11",
+    // Not supported.
+    // "-H:+VMContinuations",    Can't be used with Truffle or CFI.
+    // "-H:+UseStringInlining",  Can't be used with Truffle.
 ).plus(
     if (jvmTarget > 24) listOf(
         "-H:+VectorAPISupport",
@@ -356,6 +373,7 @@ val gvmFlags = (if (enablePgo) listOf(
     "-H:+PreserveFramePointer",
     "-H:IncludeResources=org/graalvm/shadowed/com/ibm/icu/ICUConfig.properties",
     "-H:+CopyLanguageResources",
+    "-H:+RemoveUnusedSymbols",
     "--static-nolibc",
     "--exact-reachability-metadata",
     "--native-compiler-path=$nativeCompilerPath",
@@ -371,6 +389,7 @@ val gvmFlags = (if (enablePgo) listOf(
     if (enableAuxCache) listOf(
         "-H:+AuxiliaryEngineCache",
         "-H:ReservedAuxiliaryImageBytes=107374182",
+        "-Dpolyglot.engine.Cache=/tmp/elide-auxcache.bin",
     ) else emptyList()
 ).plus(
     if (enableSbom) listOf(
@@ -383,9 +402,14 @@ val gvmFlags = (if (enablePgo) listOf(
 )
 
 val jvmOnly: Configuration by configurations.creating { isCanBeResolved = true }
-val truffle: Configuration by configurations.creating { isCanBeResolved = true }
+
 val pkl: Configuration by configurations.creating { isCanBeResolved = true }
 val unshaded: Configuration by configurations.creating { isCanBeResolved = true }
+
+val truffle: Configuration by configurations.creating {
+    isCanBeResolved = true
+    extendsFrom(patched)
+}
 
 fun extendsBaseClasspath(configuration: Configuration) {
     configurations.compileClasspath.extendsFrom(
@@ -426,11 +450,13 @@ dependencies {
     truffle("org.graalvm.python:python-language:$graalvmVersion")
     truffle("org.graalvm.js:js-language:$graalvmVersion")
     truffle("org.graalvm.nativeimage:truffle-runtime-svm:$graalvmVersion")
+    truffle("org.graalvm.truffle:truffle-api:$graalvmVersion")
     truffle("org.graalvm.truffle:truffle-enterprise:$graalvmVersion")
     truffle("org.graalvm.shadowed:icu4j:$graalvmVersion")
     truffle("org.graalvm.polyglot:js:$graalvmVersion")
     truffle("org.graalvm.polyglot:python:$graalvmVersion")
     truffle("org.graalvm.truffle:truffle-nfi-libffi:$graalvmVersion")
+    truffle(patchedLibs)
 
     if (enableIsolates) {
         truffle("org.graalvm.polyglot:js-isolate:$graalvmVersion")
@@ -659,6 +685,8 @@ tasks.test {
 tasks.named("run", JavaExec::class) {
     jvmArgs(jvmFlags)
     classpath(configurations.runtimeClasspath, jvmOnly)
+    outputs.upToDateWhen { false }
+    doNotTrackState("not cacheable")
 }
 
 tasks.withType<JavaCompile>().configureEach {
@@ -725,5 +753,14 @@ listOf(
 ).forEach {
     tasks.named(it).configure {
         dependsOn("minifiedJar")
+    }
+}
+
+configurations.all {
+    listOf(
+        "org.graalvm.js:js-language",
+        "org.graalvm.truffle:truffle-api",
+    ).forEach {
+        exclude(group = it.substringBefore(":"), module = it.substringAfter(":"))
     }
 }
